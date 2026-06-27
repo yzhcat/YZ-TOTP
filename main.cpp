@@ -19,7 +19,6 @@
 #include "otpauth.h"
 #include "totp.hpp"
 
-#define OTPAUTH_PATH "otpauth.txt"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +26,93 @@
 #include <vector>
 #include <string>
 #include <windows.h>
+
+// Default otpauth.txt content
+static const char* DEFAULT_OTPAUTH_CONTENT =
+    "# TOTP Configuration\n"
+    "# Format: otpauth://totp/Name?secret=KEY&algorithm=SHA1&digits=6&period=30\n"
+    "# Reference: https://github.com/google/google-authenticator/wiki/Key-Uri-Format\n"
+    "\n"
+    "otpauth://totp/Example:user@example.com?secret=JBSWY3DPEHPK3PXP&algorithm=SHA1&digits=6&period=30\n"
+    "\n"
+    "# Add your TOTP entries above, one per line\n";
+
+// ============================================================================
+// Path resolution
+// ============================================================================
+
+static std::string get_exe_directory() {
+    wchar_t path[MAX_PATH];
+    if (GetModuleFileNameW(NULL, path, MAX_PATH) == 0) {
+        return "";
+    }
+    std::wstring wpath(path);
+    size_t pos = wpath.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) {
+        // Convert wstring to string
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), (int)pos, NULL, 0, NULL, NULL);
+        std::string result(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), (int)pos, &result[0], size_needed, NULL, NULL);
+        return result;
+    }
+    return "";
+}
+
+static std::string resolve_otpauth_path(LPSTR lpCmdLine) {
+    // 1. Check command line parameter /OTPAUTH:path
+    if (lpCmdLine && lpCmdLine[0] != '\0') {
+        const char* param = strstr(lpCmdLine, "/OTPAUTH:");
+        if (param) {
+            param += 9; // Skip "/OTPAUTH:"
+            const char* end = strpbrk(param, " \t");
+            std::string path;
+            if (end) {
+                path = std::string(param, end - param);
+            } else {
+                path = std::string(param);
+            }
+            if (!path.empty()) {
+                FILE* f = fopen(path.c_str(), "r");
+                if (f) {
+                    fclose(f);
+                    return path;
+                }
+            }
+        }
+    }
+
+    // 2. Check current working directory
+    FILE* f = fopen("otpauth.txt", "r");
+    if (f) {
+        fclose(f);
+        return "otpauth.txt";
+    }
+
+    // 3. Check exe directory
+    std::string exe_dir = get_exe_directory();
+    if (!exe_dir.empty()) {
+        std::string exe_path = exe_dir + "/otpauth.txt";
+        FILE* fe = fopen(exe_path.c_str(), "r");
+        if (fe) {
+            fclose(fe);
+            return exe_path;
+        }
+    }
+
+    // 4. Create default file in exe directory
+    if (!exe_dir.empty()) {
+        std::string exe_path = exe_dir + "/otpauth.txt";
+        FILE* fc = fopen(exe_path.c_str(), "w");
+        if (fc) {
+            fputs(DEFAULT_OTPAUTH_CONTENT, fc);
+            fclose(fc);
+            MessageBoxW(NULL, L"Created default otpauth.txt in exe directory.\nPlease edit it with your TOTP entries.", L"Info", MB_ICONINFORMATION);
+            return exe_path;
+        }
+    }
+
+    return "";
+}
 
 // ============================================================================
 // Data structures
@@ -267,13 +353,22 @@ static void on_close(UiWindow win, void *userdata) {
 // Main
 // ============================================================================
 
+static std::string g_otpauth_path;
+
 int main_impl();
 
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     (void)hInstance;
     (void)hPrevInstance;
-    (void)lpCmdLine;
     (void)nCmdShow;
+
+    // Resolve otpauth.txt path
+    g_otpauth_path = resolve_otpauth_path(lpCmdLine);
+    if (g_otpauth_path.empty()) {
+        MessageBoxW(NULL, L"Failed to resolve otpauth.txt path", L"Error", MB_ICONERROR);
+        return 1;
+    }
+
     return main_impl();
 }
 
@@ -291,11 +386,11 @@ int main_impl() {
     }
 
     // Load otpauth entries
-    load_otpauth_file(OTPAUTH_PATH);
+    load_otpauth_file(g_otpauth_path.c_str());
 
     if (g_entries.empty()) {
         wchar_t msg[512];
-        swprintf(msg, sizeof(msg) / sizeof(wchar_t), L"No valid otpauth entries found in %S", OTPAUTH_PATH);
+        swprintf(msg, sizeof(msg) / sizeof(wchar_t), L"No valid otpauth entries found in:\n%S", g_otpauth_path.c_str());
         MessageBoxW(NULL, msg, L"Error", MB_ICONWARNING);
         return 1;
     }
