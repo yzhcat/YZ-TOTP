@@ -1,0 +1,5 @@
+*.obj
+otpauth*.txt
+*.exe
+*.exe.old
+out/*
