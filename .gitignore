@@ -4,3 +4,4 @@ otpauth*.txt
 *.exe.old
 out/*
 3rdparty/test_*
+*.bin

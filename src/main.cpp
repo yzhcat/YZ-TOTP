@@ -2,10 +2,11 @@
  * TOTP Viewer - Windows GUI application using Core UI
  *
  * Build:
- *   ./build.nob
+ *  In Visual Studio 2026 Build Tools, run:
+ *   ./nob.exe
  *
  * Or manually:
- *   cl.exe /std:c++17 /EHsc /I3rdparty\core-ui\include /Ilib main.cpp ^
+ *   cl.exe /std:c++17 /EHsc /I3rdparty\core-ui\include /Ilib src\main.cpp ^
  *       lib\hash-library\sha1.cpp lib\hash-library\sha256.cpp lib\hash-library\sha512.cpp ^
  *       3rdparty\core-ui\lib\dynamic\core-ui.lib ^
  *       /link /SUBSYSTEM:windows user32.lib gdi32.lib winmm.lib comdlg32.lib shell32.lib
@@ -14,10 +15,12 @@
 #define TOTP_IMPLEMENTATION
 #define BASE32_IMPLEMENTATION
 #define OTPAUTH_IMPLEMENTATION
+#define IO_PIPE_IMPLEMENTATION
 
 #include "ui_core.h"
 #include "otpauth.h"
 #include "totp.hpp"
+#include "io_pipe.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +39,18 @@ static const char* DEFAULT_OTPAUTH_CONTENT =
     "otpauth://totp/Example:user@example.com?secret=JBSWY3DPEHPK3PXP&algorithm=SHA1&digits=6&period=30\n"
     "\n"
     "# Add your TOTP entries above, one per line\n";
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+struct DecryptConfig {
+    std::string program;
+    std::string encrypted_file;
+};
+
+static DecryptConfig g_decrypt_config;
+static std::string g_otpauth_from_ini;  // otpauth path from INI config
 
 // ============================================================================
 // Path resolution
@@ -58,37 +73,84 @@ static std::string get_exe_directory() {
     return "";
 }
 
-static std::string resolve_otpauth_path(LPSTR lpCmdLine) {
-    // 1. Check command line parameter /OTPAUTH:path
-    if (lpCmdLine && lpCmdLine[0] != '\0') {
-        const char* param = strstr(lpCmdLine, "/OTPAUTH:");
-        if (param) {
-            param += 9; // Skip "/OTPAUTH:"
-            const char* end = strpbrk(param, " \t");
-            std::string path;
-            if (end) {
-                path = std::string(param, end - param);
-            } else {
-                path = std::string(param);
-            }
-            if (!path.empty()) {
-                FILE* f = fopen(path.c_str(), "r");
-                if (f) {
-                    fclose(f);
-                    return path;
-                }
-            }
-        }
+// ============================================================================
+// INI parsing
+// ============================================================================
+
+static std::string read_ini_string(const char *ini_path, const char *section, const char *key, const char *default_val) {
+    char buf[512] = {0};
+    GetPrivateProfileStringA(section, key, default_val, buf, sizeof(buf), ini_path);
+    return std::string(buf);
+}
+
+static void load_config_from_ini(const char *ini_path) {
+    FILE *f = fopen(ini_path, "r");
+    if (!f) return;
+    fclose(f);
+
+    g_decrypt_config.program = read_ini_string(ini_path, "decrypt", "program", "");
+    g_decrypt_config.encrypted_file = read_ini_string(ini_path, "decrypt", "file", "");
+
+    // Read otpauth path from [totp_viewer] section
+    std::string otpauth_path = read_ini_string(ini_path, "totp_viewer", "otpauth", "");
+    if (!otpauth_path.empty()) {
+        g_otpauth_from_ini = otpauth_path;
+    }
+}
+
+// ============================================================================
+// Encrypted data loading
+// ============================================================================
+
+static void* load_encrypted_data(const char *encrypted_file, const char *decrypt_program, size_t *out_len) {
+    FILE *f = fopen(encrypted_file, "rb");
+    if (!f) {
+        return NULL;
     }
 
-    // 2. Check current working directory
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    void *encrypted_data = malloc(file_size);
+    if (!encrypted_data) {
+        fclose(f);
+        return NULL;
+    }
+
+    fread(encrypted_data, 1, file_size, f);
+    fclose(f);
+
+    char *const args[] = { NULL };
+    void *decrypted_data = NULL;
+    size_t decrypted_len = 0;
+
+    int ret = io_pipe_exec(decrypt_program, args, encrypted_data, file_size, &decrypted_data, &decrypted_len);
+    free(encrypted_data);
+
+    if (ret != IO_PIPE_SUCCESS) {
+        return NULL;
+    }
+
+    *out_len = decrypted_len;
+    return decrypted_data;
+}
+
+// ============================================================================
+// OTPAuth path resolution (default paths only)
+// ============================================================================
+
+static std::string resolve_otpauth_path(LPSTR lpCmdLine) {
+    (void)lpCmdLine;
+
+    // 1. Check current working directory
     FILE* f = fopen("otpauth.txt", "r");
     if (f) {
         fclose(f);
         return "otpauth.txt";
     }
 
-    // 3. Check exe directory
+    // 2. Check exe directory
     std::string exe_dir = get_exe_directory();
     if (!exe_dir.empty()) {
         std::string exe_path = exe_dir + "/otpauth.txt";
@@ -99,7 +161,7 @@ static std::string resolve_otpauth_path(LPSTR lpCmdLine) {
         }
     }
 
-    // 4. Create default file in exe directory
+    // 3. Create default file in exe directory
     if (!exe_dir.empty()) {
         std::string exe_path = exe_dir + "/otpauth.txt";
         FILE* fc = fopen(exe_path.c_str(), "w");
@@ -325,6 +387,42 @@ static void load_otpauth_file(const char *path) {
     fclose(fp);
 }
 
+static void load_otpauth_from_memory(const char *data, size_t len) {
+    const char *ptr = data;
+    const char *end = data + len;
+
+    while (ptr < end) {
+        const char *line_end = (const char *)memchr(ptr, '\n', end - ptr);
+        if (!line_end) line_end = end;
+
+        size_t line_len = line_end - ptr;
+        if (line_len > 0) {
+            char *line = (char *)malloc(line_len + 1);
+            if (line) {
+                memcpy(line, ptr, line_len);
+                line[line_len] = '\0';
+
+                size_t actual_len = strlen(line);
+                while (actual_len > 0 && (line[actual_len-1] == '\n' || line[actual_len-1] == '\r')) {
+                    line[--actual_len] = '\0';
+                }
+
+                if (actual_len > 0) {
+                    OTPAuthEntry auth;
+                    otpauth_init(&auth);
+                    if (otpauth_parse(line, &auth)) {
+                        add_entry(&auth);
+                    }
+                }
+
+                free(line);
+            }
+        }
+
+        ptr = line_end + 1;
+    }
+}
+
 // ============================================================================
 // Window Callbacks
 // ============================================================================
@@ -354,6 +452,7 @@ static void on_close(UiWindow win, void *userdata) {
 // ============================================================================
 
 static std::string g_otpauth_path;
+static std::string g_source_info;
 
 int main_impl();
 
@@ -362,11 +461,112 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     (void)hPrevInstance;
     (void)nCmdShow;
 
-    // Resolve otpauth.txt path
+    bool show_source = false;
+
+    // Check for /SHOW_SOURCE parameter
+    if (lpCmdLine && lpCmdLine[0] != '\0') {
+        if (strstr(lpCmdLine, "/SHOW_SOURCE") != NULL) {
+            show_source = true;
+        }
+    }
+
+    // Priority 1: /OTPAUTH command line parameter (highest priority, plain text)
+    if (lpCmdLine && lpCmdLine[0] != '\0') {
+        const char* param = strstr(lpCmdLine, "/OTPAUTH:");
+        if (param) {
+            param += 9;
+            const char* end = strpbrk(param, " \t");
+            std::string path;
+            if (end) {
+                path = std::string(param, end - param);
+            } else {
+                path = std::string(param);
+            }
+            if (!path.empty()) {
+                FILE* f = fopen(path.c_str(), "r");
+                if (f) {
+                    fclose(f);
+                    g_otpauth_path = path;
+                    g_source_info = "Command line: " + path;
+                    if (show_source) {
+                        MessageBoxW(NULL, std::wstring(g_source_info.begin(), g_source_info.end()).c_str(), L"Data Source", MB_ICONINFORMATION);
+                    }
+                    return main_impl();
+                } else {
+                    std::wstring msg = L"File not found: " + std::wstring(path.begin(), path.end());
+                    MessageBoxW(NULL, msg.c_str(), L"Error", MB_ICONERROR);
+                    return 1;
+                }
+            }
+        }
+    }
+
+    // Priority 2: /INI_PATH command line parameter
+    bool has_custom_ini = false;
+    if (lpCmdLine && lpCmdLine[0] != '\0') {
+        const char* param = strstr(lpCmdLine, "/INI_PATH:");
+        if (param) {
+            param += 10;
+            const char* end = strpbrk(param, " \t");
+            std::string custom_ini;
+            if (end) {
+                custom_ini = std::string(param, end - param);
+            } else {
+                custom_ini = std::string(param);
+            }
+
+            FILE* test = fopen(custom_ini.c_str(), "r");
+            if (!test) {
+                std::wstring msg = L"INI file not found: " + std::wstring(custom_ini.begin(), custom_ini.end());
+                MessageBoxW(NULL, msg.c_str(), L"Error", MB_ICONERROR);
+                return 1;
+            }
+            fclose(test);
+
+            load_config_from_ini(custom_ini.c_str());
+            has_custom_ini = true;
+        }
+    }
+
+    // Priority 3: INI config from exe directory
+    if (!has_custom_ini) {
+        std::string exe_dir = get_exe_directory();
+        std::string ini_path = exe_dir + "/totp_viewer.ini";
+        load_config_from_ini(ini_path.c_str());
+    }
+
+    // Priority 4: Decrypt config from INI (if configured)
+    if (!g_decrypt_config.program.empty() && !g_decrypt_config.encrypted_file.empty()) {
+        g_source_info = "INI config: encrypted file via " + g_decrypt_config.program;
+        if (show_source) {
+            MessageBoxW(NULL, std::wstring(g_source_info.begin(), g_source_info.end()).c_str(), L"Data Source", MB_ICONINFORMATION);
+        }
+        return main_impl();
+    }
+
+    // Priority 5: Plain text otpauth from INI
+    if (!g_otpauth_from_ini.empty()) {
+        FILE* f = fopen(g_otpauth_from_ini.c_str(), "r");
+        if (f) {
+            fclose(f);
+            g_otpauth_path = g_otpauth_from_ini;
+            g_source_info = "INI config: " + g_otpauth_path;
+            if (show_source) {
+                MessageBoxW(NULL, std::wstring(g_source_info.begin(), g_source_info.end()).c_str(), L"Data Source", MB_ICONINFORMATION);
+            }
+            return main_impl();
+        }
+    }
+
+    // Priority 6: Default path resolution
     g_otpauth_path = resolve_otpauth_path(lpCmdLine);
     if (g_otpauth_path.empty()) {
         MessageBoxW(NULL, L"Failed to resolve otpauth.txt path", L"Error", MB_ICONERROR);
         return 1;
+    }
+    g_source_info = "Default path: " + g_otpauth_path;
+    if (show_source) {
+        MessageBoxW(NULL, std::wstring(g_source_info.begin(), g_source_info.end()).c_str(), L"Data Source", MB_ICONINFORMATION);
     }
 
     return main_impl();
@@ -386,11 +586,38 @@ int main_impl() {
     }
 
     // Load otpauth entries
-    load_otpauth_file(g_otpauth_path.c_str());
+    if (!g_decrypt_config.program.empty() && !g_decrypt_config.encrypted_file.empty()) {
+        // Load from encrypted file via decrypt program
+        size_t decrypted_len = 0;
+        void *decrypted_data = load_encrypted_data(
+            g_decrypt_config.encrypted_file.c_str(),
+            g_decrypt_config.program.c_str(),
+            &decrypted_len);
+
+        if (!decrypted_data) {
+            wchar_t msg[512];
+            swprintf(msg, sizeof(msg) / sizeof(wchar_t),
+                L"Failed to decrypt file:\n%S\nusing program:\n%S",
+                g_decrypt_config.encrypted_file.c_str(),
+                g_decrypt_config.program.c_str());
+            MessageBoxW(NULL, msg, L"Error", MB_ICONERROR);
+            return 1;
+        }
+
+        load_otpauth_from_memory((const char*)decrypted_data, decrypted_len);
+        free(decrypted_data);
+    } else {
+        // Load from regular otpauth file
+        load_otpauth_file(g_otpauth_path.c_str());
+    }
 
     if (g_entries.empty()) {
         wchar_t msg[512];
-        swprintf(msg, sizeof(msg) / sizeof(wchar_t), L"No valid otpauth entries found in:\n%S", g_otpauth_path.c_str());
+        if (!g_decrypt_config.program.empty()) {
+            swprintf(msg, sizeof(msg) / sizeof(wchar_t), L"No valid otpauth entries found in decrypted data");
+        } else {
+            swprintf(msg, sizeof(msg) / sizeof(wchar_t), L"No valid otpauth entries found in:\n%S", g_otpauth_path.c_str());
+        }
         MessageBoxW(NULL, msg, L"Error", MB_ICONWARNING);
         return 1;
     }

@@ -1,6 +1,6 @@
 #define NOB_IMPLEMENTATION
 #define NOB_UNSTRIP_PREFIX
-#include "nob.h"
+#include "include/nob.h"
 
 #include <stdio.h>
 #include <sys/stat.h>
@@ -21,10 +21,11 @@ int main(int argc, char **argv)
         "/utf-8",
         "/D_CRT_SECURE_NO_WARNINGS",
         "/I3rdparty/core-ui/include",
+        "/Iinclude",
         "/Ilib",
         "/Fo:build/",
         "/Fe:out/totp_viewer.exe",
-        "main.cpp",
+        "src/main.cpp",
         "lib/hash-library/sha1.cpp",
         "lib/hash-library/sha256.cpp",
         "lib/hash-library/sha512.cpp",
