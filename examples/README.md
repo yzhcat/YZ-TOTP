@@ -62,6 +62,7 @@ file = otpauth.enc
 |------|------|
 | `totp_viewer.ini` | 配置文件 |
 | `decrypt.py` | 解密脚本（hex 编码） |
+| `decrypt_key.py` | 解密脚本（hex 编码，使用密钥） |
 | `encrypt.py` | 加密脚本（hex 编码） |
 | `otpauth.enc` | 加密后的 otpauth 数据（hex 格式） |
 | `otpauth.data` | 原始 otpauth 数据（用于对比） |
