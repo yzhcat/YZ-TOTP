@@ -62,7 +62,8 @@ file = otpauth.enc
 |------|------|
 | `totp_viewer.ini` | 配置文件 |
 | `decrypt.py` | 解密脚本（hex 编码） |
-| `decrypt_key.py` | 解密脚本（hex 编码，使用密钥） |
+| `decrypt_key.py` | 解密脚本（支持密码/密钥文件认证） |
+| `totp_manager.py` | TOTP 管理器（AES 加密，GUI 编辑界面） |
 | `encrypt.py` | 加密脚本（hex 编码） |
 | `otpauth.enc` | 加密后的 otpauth 数据（hex 格式） |
 | `otpauth.data` | 原始 otpauth 数据（用于对比） |
@@ -95,6 +96,31 @@ cat otpauth.enc | python3 decrypt.py
 ```
 
 ## 自定义解密程序示例
+
+### totp_manager.py - TOTP 管理器
+
+使用 AES-256-CBC 加密：
+
+**功能**：
+- GUI 界面编辑 TOTP 条目
+- AES-256-CBC 加密存储
+- 添加、编辑、删除、上移、下移条目
+- 导入/导出功能
+
+**前置条件**：
+```powershell
+pip install pycryptodome
+```
+
+**直接运行（GUI 模式）**：
+```powershell
+python totp_manager.py
+```
+
+**被调用时（静默模式）**：
+```powershell
+echo $encrypted_data | python totp_manager.py
+```
 
 ### Python (hex 编码)
 
