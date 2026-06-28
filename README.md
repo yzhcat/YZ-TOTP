@@ -73,6 +73,11 @@ YZ-TOTP/
 └── examples/README.md # 解密程序说明
 ```
 
+## 安全提示
+项目仅用于学习和研究目的，不建议在生产环境中使用。
+
+不要分享你的密钥 - TOTP密钥等同于密码，应严格保密。
+
 ## 依赖
 
 - [core-ui](https://github.com/ghboke/core-ui) - Windows GUI 库
